@@ -6,7 +6,7 @@ ARG USER_GID=$USER_UID
 
 # System packages
 RUN apt-get update && \
-    apt-get install --no-install-recommends -y ffmpeg rubberband-cli imagemagick curl unzip fonts-dejavu-core && \
+    apt-get install --no-install-recommends -y ffmpeg rubberband-cli imagemagick curl unzip fonts-dejavu-core build-essential rustc cargo && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh && \
     sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml 2>/dev/null; \

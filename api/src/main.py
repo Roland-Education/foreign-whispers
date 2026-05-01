@@ -46,12 +46,26 @@ async def lifespan(app: FastAPI):
 
 
 def get_whisper_model(app):
-    """Lazy-load Whisper model on first use."""
+    """Lazy-load Whisper model on first use.
+
+    With FW_WHISPER_BACKEND=remote, returns a RemoteWhisperBackend that POSTs
+    audio to FW_WHISPER_API_URL/v1/audio/transcriptions (e.g. a Colab-hosted
+    speaches/faster-whisper tunnel). Otherwise loads openai-whisper locally.
+    """
     if app.state._whisper_model is None:
-        logger.info("Loading Whisper model (%s)...", settings.whisper_model)
-        import whisper
-        app.state._whisper_model = whisper.load_model(settings.whisper_model)
-        logger.info("Whisper model loaded.")
+        if settings.whisper_backend == "remote":
+            from api.src.inference import get_whisper_backend
+            logger.info(
+                "Using remote Whisper backend at %s", settings.whisper_api_url,
+            )
+            app.state._whisper_model = get_whisper_backend(
+                "remote", api_url=settings.whisper_api_url,
+            )
+        else:
+            logger.info("Loading Whisper model (%s)...", settings.whisper_model)
+            import whisper
+            app.state._whisper_model = whisper.load_model(settings.whisper_model)
+            logger.info("Whisper model loaded.")
     return app.state._whisper_model
 
 

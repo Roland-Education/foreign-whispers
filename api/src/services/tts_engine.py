@@ -440,11 +440,19 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     _aligned_list = list(align_map.values())
 
     # ── Prepare per-segment metadata ────────────────────────────────────
+    en_segments = en_transcript.get("segments", [])
     seg_metas = []
     for i, seg in enumerate(segments):
         aligned_seg = align_map.get(i)
         stretch_factor = aligned_seg.stretch_factor if aligned_seg else 1.0
-        target_sec = seg["end"] - seg["start"]
+        # Time-stretch target is the *source-language* segment duration:
+        # the translated JSON's timestamps may drift (re-segmentation, rounding),
+        # but the original English window is what the video frames actually need.
+        if i < len(en_segments):
+            en_seg = en_segments[i]
+            target_sec = en_seg["end"] - en_seg["start"]
+        else:
+            target_sec = seg["end"] - seg["start"]
 
         seg_text = seg["text"]
         if aligned_seg is not None:

@@ -74,6 +74,10 @@ def stitch_audio(video_path: str, audio_path: str, output_path: str):
         "-c:v", "copy",        # copy video stream without re-encoding
         "-map", "0:v:0",       # take video from first input
         "-map", "1:a:0",       # take audio from second input
+        "-c:a", "aac",         # force AAC encoder (default picked 5kbps mono)
+        "-b:a", "192k",
+        "-ac", "2",
+        "-ar", "48000",
         "-shortest",           # stop when shortest stream ends
         output_path,
     ]
