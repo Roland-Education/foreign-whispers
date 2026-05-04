@@ -245,3 +245,15 @@ The pyannote speaker-diarization step is **optional**. If you want speaker-aware
 - Python 3.11 (only needed if running notebooks / library outside Docker)
 - ffmpeg (system-wide, only needed for non-Docker workflows)
 - For the `nvidia` profile: NVIDIA drivers + the NVIDIA Container Toolkit
+
+## Demo videos
+
+Sample input and output videos are hosted on Google Drive:
+
+**[Foreign Whispers Submission Folder](https://drive.google.com/drive/folders/1kltFc07M1IHnGhsFtW_UM5Di9xIfIg8m?usp=sharing)**
+
+The folder contains:
+- `sample_input.mp4` — original English YouTube video (60 Minutes segment on the Strait of Hormuz)
+- `sample_output_baseline.mp4` — Spanish-dubbed output from the baseline pipeline using chatterbox-multilingual TTS with speaker-conditioned voice cloning
+
+The pipeline runs end-to-end through the Dubbing Studio frontend at http://localhost:8501 against the Docker stack (`docker compose --profile cpu up -d`). The baseline mode produces real Spanish dubbed audio. Aligned mode (the Phase 2 alignment optimizer that redistributes silence slack across segments) is partially wired but currently emits audio artifacts; this is documented as a known limitation in the architecture report.
