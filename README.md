@@ -248,16 +248,23 @@ The pyannote speaker-diarization step is **optional**. If you want speaker-aware
 
 ## Demo videos
 
-Sample input and output videos are hosted on Google Drive:
+Sample input, output, and an app screen recording are hosted on Google Drive:
 
 **[Foreign Whispers Submission Folder](https://drive.google.com/drive/folders/1kltFc07M1IHnGhsFtW_UM5Di9xIfIg8m?usp=sharing)**
 
 The folder contains:
 - `sample_input.mp4` — original English YouTube video (60 Minutes segment on the Strait of Hormuz)
-- `sample_output_baseline.mp4` — Spanish-dubbed output from the baseline pipeline using chatterbox-multilingual TTS with speaker-conditioned voice cloning
+- A Spanish-dubbed output produced by the aligned pipeline with per-speaker voice cloning (chatterbox-multilingual conditioned on three speaker reference WAVs derived from pyannote diarization) and Spanish subtitles burned into the video for legibility
+- A screen recording of the Dubbing Studio frontend running the full pipeline end-to-end
 
-The pipeline runs end-to-end through the Dubbing Studio frontend at http://localhost:8501 against the Docker stack (`docker compose --profile cpu up -d`). The baseline mode produces real Spanish dubbed audio. Aligned mode (the Phase 2 alignment optimizer that redistributes silence slack across segments) is partially wired but currently emits audio artifacts; this is documented as a known limitation in the architecture report.
+The pipeline runs through the Dubbing Studio frontend at http://localhost:8501 against the Docker stack (`docker compose --profile nvidia up -d`, or `--profile cpu` on Apple Silicon).
+
+### Reproducibility notes
+
+- **YouTube downloads.** `get_video_info` checks `video_registry.yml` first and falls back to `yt-dlp` only for unregistered URLs. On networks where YouTube triggers its bot-check (datacenter IPs, some VPNs), use the registered videos in the catalog or place the MP4 manually in `pipeline_data/api/videos/<title>.mp4` to bypass the live download.
+- **Speaker reference WAVs.** Chatterbox-multilingual's reference encoder requires 24 kHz mono. Reference WAVs at other rates fail with opaque tensor errors inside the model. The reference WAVs in `pipeline_data/speakers/` ship at 24 kHz.
+- **TTS concurrency.** Chatterbox-multilingual's inference state is not thread-safe under concurrent `/v1/audio/speech/upload` calls. Set `FW_TTS_WORKERS=1` for the api container to force serial synthesis. The default in `docker-compose.yml` reflects this.
 
 ## Architecture report
 
-A 4-page architecture report covering pipeline design, the five upstream chatterbox-multilingual patches diagnosed during development, the project journey, and lessons learned is at [`report/foreign_whispers_report.docx`](report/foreign_whispers_report.docx).
+A 5-6 page architecture report covering pipeline design, voice cloning per speaker, the project journey across three reproducibility pivots, the upstream chatterbox-multilingual issues diagnosed during development, and lessons learned is at [`report/foreign_whispers_report.docx`](report/foreign_whispers_report.docx).

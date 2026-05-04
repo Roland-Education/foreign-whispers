@@ -41,7 +41,19 @@ def _extract_video_id(url):
     return m.group(1)
 
 def get_video_info(url):
-    """returns video_id, video_title"""
+    """returns (video_id, video_title).
+
+    Uses video_registry.yml when the URL's video_id is registered,
+    avoiding yt-dlp calls that may fail on datacenter IPs blocked by
+    YouTube's bot detection. Falls back to yt-dlp for unregistered URLs."""
+    try:
+        vid_id = _extract_video_id(url)
+        from api.src.core.video_registry import get_video as _registry_get
+        entry = _registry_get(vid_id)
+        if entry is not None:
+            return entry.id, entry.title
+    except Exception:
+        pass
     with yt_dlp.YoutubeDL(_yt_dlp_opts(skip_download=True)) as ydl:
         info = ydl.extract_info(url, download=False, process=False)
     return info["id"], info["title"]
