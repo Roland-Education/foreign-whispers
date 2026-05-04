@@ -46,10 +46,17 @@ foreign-whispers/
 
 **Always use Docker Compose — never launch with `uvicorn` or `next dev` directly.**
 
-This host has an NVIDIA GPU; always use the `nvidia` profile:
+Pick a profile based on the host:
+
+- **`nvidia`** — Linux host with an NVIDIA GPU (CUDA Whisper + Chatterbox).
+- **`cpu`** — CPU-only host, including Apple Silicon Macs. Uses multi-arch
+  `speaches:*-cpu` for STT and `travisvn/chatterbox-tts-api:cpu` for TTS.
+  Voice cloning works on both profiles; synthesis is just much slower on
+  CPU.
 
 ```bash
-docker compose --profile nvidia up -d
+docker compose --profile nvidia up -d   # GPU host
+docker compose --profile cpu up -d      # Mac / no GPU
 ```
 
 - Frontend (Next.js): <http://localhost:8501>

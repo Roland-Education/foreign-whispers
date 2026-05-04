@@ -1,5 +1,11 @@
 services:
-  # ── STT (Speech-to-Text) — GPU only ────────────────────────────────
+  # ══ Profiles ════════════════════════════════════════════════════════
+  # nvidia → Linux host with an NVIDIA GPU (CUDA whisper + Chatterbox)
+  # cpu    → CPU-only host, including Apple Silicon Macs (multi-arch
+  #          speaches CPU image + Piper TTS via openedai-speech-min)
+  # ════════════════════════════════════════════════════════════════════
+
+  # ── STT (Speech-to-Text) — GPU profile ────────────────────────────
   whisper-gpu:
     container_name: foreign-whispers-stt
     profiles: [nvidia]
@@ -25,6 +31,25 @@ services:
       retries: 3
       start_period: 30s
 
+  # ── STT — CPU profile (multi-arch, runs on Apple Silicon) ─────────
+  whisper-cpu:
+    container_name: foreign-whispers-stt
+    profiles: [cpu]
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - whisper-cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      - WHISPER__MODEL=Systran/faster-whisper-base
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://0.0.0.0:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
   # ── TTS (Text-to-Speech) — Chatterbox on GPU ──────────────────────
   chatterbox-gpu:
     container_name: foreign-whispers-tts
@@ -49,9 +74,32 @@ services:
               count: all
               capabilities: [gpu]
 
+  # ── TTS — CPU profile (Chatterbox CPU build, multi-arch) ──────────
+  # Same Chatterbox API surface as the GPU service, including voice
+  # cloning via /v1/audio/speech/upload. Synthesis is much slower on
+  # CPU, so the model defaults to single-language to keep latency down.
+  chatterbox-cpu:
+    container_name: foreign-whispers-tts
+    profiles: [cpu]
+    image: travisvn/chatterbox-tts-api:cpu
+    restart: unless-stopped
+    shm_size: "4gb"
+    ports:
+      - "8020:8020"
+    environment:
+      - DEVICE=cpu
+      - DEFAULT_MODEL=multilingual
+      - PORT=8020
+      - HOST=0.0.0.0
+    volumes:
+      - chatterbox-models:/app/models
+      - ./pipeline_data/speakers:/app/voices
+
   # ── API (CPU orchestrator) — all profiles ─────────────────────────
   # The API container is CPU-only. It delegates GPU work to the STT
-  # and TTS containers above via HTTP.
+  # and TTS containers above via HTTP. Inter-service URLs use the
+  # docker-compose service DNS names (also stable across profiles
+  # because each STT/TTS variant shares the same container_name).
   api:
     container_name: foreign-whispers-api
     profiles: [nvidia, cpu]
@@ -62,10 +110,16 @@ services:
         USER_UID: "${UID:-1000}"
         USER_GID: "${GID:-1000}"
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8080:8080"
     command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
-      - CHATTERBOX_API_URL=http://localhost:8020
+      # Override CHATTERBOX_API_URL in .env to point at a remote
+      # Chatterbox (e.g. a Colab GPU tunnel). Default routes to the
+      # bundled chatterbox container via the docker-compose network.
+      - CHATTERBOX_API_URL=${CHATTERBOX_API_URL:-http://foreign-whispers-tts:8020}
+      - CHATTERBOX_READ_TIMEOUT=${CHATTERBOX_READ_TIMEOUT:-600}
+      - FW_WHISPER_API_URL=http://foreign-whispers-stt:8000
       - FW_WHISPER_MODEL=base
     volumes:
       - ./pipeline_data:/app/pipeline_data
@@ -81,9 +135,10 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8501:8501"
     environment:
-      - API_URL=http://localhost:8080
+      - API_URL=http://foreign-whispers-api:8080
       - HOSTNAME=0.0.0.0
       - PORT=8501
     healthcheck:

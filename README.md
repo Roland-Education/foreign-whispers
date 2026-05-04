@@ -16,7 +16,7 @@ flowchart LR
         DL[Download<br/>yt-dlp]
         TR[Transcribe<br/>Whisper]
         TL[Translate<br/>argostranslate]
-        TTS[Synthesize Speech<br/>Chatterbox GPU]
+        TTS[Synthesize Speech<br/>Chatterbox]
         ST[Render Dubbed Video<br/>ffmpeg remux]
     end
 
@@ -46,38 +46,111 @@ flowchart LR
 
 ## Quick Start
 
-Two profiles are available via Docker Compose:
+### Prerequisites
+
+- Docker & Docker Compose
+- ~5 GB free disk for model caches on first boot
+
+### 1. Clone and create the optional cookies placeholder
 
 ```bash
-# NVIDIA GPU — Whisper + Chatterbox on dedicated GPU containers
-docker compose --profile nvidia up -d
+git clone <repo-url> foreign-whispers
+cd foreign-whispers
+touch cookies.txt   # placeholder for optional yt-dlp YouTube auth — leave empty if not needed
+```
 
-# CPU only — no GPU containers (STT/TTS must be provided externally)
+`cookies.txt` is bind-mounted into the API container. Docker silently creates a *directory* with that name if the file is missing, which breaks yt-dlp — so always run `touch cookies.txt` on a fresh clone. If you need to download age- or region-restricted videos, replace it with a real Netscape-format cookies file.
+
+### 2. Boot the stack
+
+Pick the profile that matches your hardware. Both bundle Whisper STT and Chatterbox TTS — there is **no external setup**.
+
+**Linux + NVIDIA GPU** (Whisper + Chatterbox on CUDA, ~real-time TTS):
+
+```bash
+docker compose --profile nvidia up -d
+```
+
+**Apple Silicon Mac or any CPU-only host** (multi-arch CPU images, voice cloning still works, but TTS is ~30-50× slower):
+
+```bash
 docker compose --profile cpu up -d
 ```
 
-Open **http://localhost:8501** in your browser.
+First boot downloads model weights into named volumes (~2 GB Whisper, ~1.5 GB Chatterbox). Subsequent boots are instant.
+
+### 3. Open the app
+
+Browse to <http://localhost:8501>.
+
+The catalog ships with two pre-dubbed sample videos (*Strait of Hormuz disruption*, *Alysa Liu: The 60 Minutes Interview*) so you can verify the stack is healthy without waiting for synthesis. Click one — the dubbed audio and translated captions should play immediately.
+
+### 4. Submit a new YouTube URL
+
+The video catalog is driven by [`video_registry.yml`](video_registry.yml). Add an entry:
+
+```yaml
+- id: <youtube-video-id>
+  title: A Human-Readable Title
+  url: https://www.youtube.com/watch?v=<youtube-video-id>
+```
+
+Reload the API so it picks up the new entry:
+
+```bash
+docker compose --profile <nvidia|cpu> restart api
+```
+
+Refresh the frontend — your new video appears in the sidebar. Click through the pipeline buttons (Download → Transcribe → Translate → TTS → Stitch) to dub it.
+
+## Profile comparison
+
+|                          | `nvidia`                              | `cpu`                                                      |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------------- |
+| Whisper image            | `speaches:*-cuda-12.6.3`              | `speaches:*-cpu` (multi-arch, incl. arm64)                 |
+| TTS image                | `travisvn/chatterbox-tts-api:latest`  | `travisvn/chatterbox-tts-api:cpu` (multi-arch)             |
+| Voice cloning            | ✅ via `/v1/audio/speech/upload`       | ✅ same endpoint                                            |
+| TTS latency / segment    | ~1 s                                  | ~30–50 s on Apple Silicon                                  |
+| End-to-end dub of a 7-min video | ~3–5 min                       | ~30–45 min                                                 |
+
+If you're on a Mac and want faster TTS without GPU, see [`notebooks/tts_integration/chatterbox_colab_remote.ipynb`](notebooks/tts_integration/chatterbox_colab_remote.ipynb). It boots Chatterbox on a free Colab GPU and exposes it through a Cloudflare tunnel; on the Mac, set `CHATTERBOX_API_URL=<tunnel-url>` in `.env` and recreate the api container.
 
 ## Pipeline Stages
 
-| Stage | What it does | Output |
-|-------|-------------|--------|
-| **Download** | Fetch video + captions from YouTube via yt-dlp | `videos/`, `youtube_captions/` |
-| **Transcribe** | Speech-to-text via Whisper | `transcriptions/whisper/` |
-| **Translate** | Source → target language via argostranslate (offline, OpenNMT) | `translations/argos/` |
-| **Synthesize Speech** | TTS via Chatterbox (GPU) or Coqui (CPU fallback), time-aligned to original segments | `tts_audio/chatterbox/` |
-| **Render Dubbed Video** | Replace audio track via ffmpeg remux (no re-encoding) | `dubbed_videos/` |
+| Stage                    | What it does                                                            | Output                       |
+| ------------------------ | ----------------------------------------------------------------------- | ---------------------------- |
+| **Download**             | Fetch video + captions from YouTube via yt-dlp                          | `videos/`, `youtube_captions/` |
+| **Transcribe**           | Speech-to-text via Whisper                                              | `transcriptions/whisper/`    |
+| **Translate**            | Source → target language via argostranslate (offline, OpenNMT)          | `translations/argos/`        |
+| **Synthesize Speech**    | TTS via Chatterbox, time-aligned and voice-cloned per segment           | `tts_audio/chatterbox/`      |
+| **Render Dubbed Video**  | Replace audio track via ffmpeg remux (no re-encoding)                   | `dubbed_videos/`             |
 
 Captions are served as WebVTT via the `<track>` element — no subtitle burn-in:
 
-| Endpoint | Source | Output |
-|----------|--------|--------|
-| `GET /api/captions/{id}/original` | YouTube captions (generated on the fly) | — |
-| `GET /api/captions/{id}` | Translated segments + YouTube timing offset | `dubbed_captions/*.vtt` |
+| Endpoint                              | Source                                  | Output                  |
+| ------------------------------------- | --------------------------------------- | ----------------------- |
+| `GET /api/captions/{id}/original`     | YouTube captions (generated on the fly) | —                       |
+| `GET /api/captions/{id}`              | Translated segments + YouTube offset    | `dubbed_captions/*.vtt` |
+
+## API Endpoints
+
+| Method | Endpoint                       | Description                                  |
+| ------ | ------------------------------ | -------------------------------------------- |
+| POST   | `/api/download`                | Download YouTube video + captions            |
+| POST   | `/api/transcribe/{id}`         | Whisper speech-to-text                       |
+| POST   | `/api/translate/{id}`          | Source → target language translation         |
+| POST   | `/api/tts/{id}`                | Time-aligned TTS synthesis                   |
+| POST   | `/api/stitch/{id}`             | Audio remux (`ffmpeg -c:v copy`)             |
+| GET    | `/api/video/{id}`              | Stream dubbed video (range requests)         |
+| GET    | `/api/video/{id}/original`     | Stream original video                        |
+| GET    | `/api/captions/{id}`           | Translated WebVTT captions                   |
+| GET    | `/api/captions/{id}/original`  | Original-language WebVTT captions            |
+| GET    | `/api/audio/{id}`              | TTS audio (WAV)                              |
+| GET    | `/healthz`                     | Health check                                 |
 
 ## Project Structure
 
-```
+```text
 foreign-whispers/
 ├── api/src/                     # FastAPI backend (layered architecture)
 │   ├── main.py                  # App factory + lazy model loading
@@ -91,159 +164,84 @@ foreign-whispers/
 │   ├── services/                # Business logic (HTTP-agnostic)
 │   ├── schemas/                 # Pydantic request/response models
 │   └── inference/               # ML model backend abstraction
+├── foreign_whispers/            # Pure-Python alignment / evaluation library
 ├── frontend/                    # Next.js + shadcn/ui
-│   ├── src/components/          # Pipeline tracker, video player, result panels
-│   ├── src/hooks/use-pipeline.ts # State machine for pipeline orchestration
-│   └── src/lib/api.ts           # API client
-├── download_video.py            # yt-dlp wrapper
-├── transcribe.py                # Whisper wrapper
-├── translate_en_to_es.py        # argostranslate wrapper
-├── tts_es.py                    # Chatterbox client + time-aligned TTS generation
-├── translated_output.py         # ffmpeg audio remux + legacy subtitle compositing
-├── pipeline_data/               # All intermediate and output files (volume-mounted)
+├── pipeline_data/               # Bind-mounted runtime artifacts
 │   └── api/
-│       ├── videos/              # Downloaded source MP4s
-│       ├── youtube_captions/    # Line-delimited JSON from yt-dlp
-│       ├── transcriptions/
-│       │   └── whisper/         # Whisper output JSON
-│       ├── translations/
-│       │   └── argos/           # argostranslate output JSON
-│       ├── tts_audio/
-│       │   └── chatterbox/       # TTS WAV files per config
-│       ├── dubbed_captions/     # Target-language VTT
-│       ├── dubbed_videos/       # Final dubbed MP4s per config
-│       └── speakers/            # Reference voice clips
-├── docker-compose.yml           # Profiles: nvidia, cpu, apple
-├── Dockerfile                   # Multi-stage: cpu and gpu targets
-└── docs/
-    └── dubbing-alignment-design.md  # TTS temporal alignment literature survey + design
+│       ├── videos/                  # Source MP4s
+│       ├── youtube_captions/        # yt-dlp caption JSON
+│       ├── transcriptions/whisper/  # Whisper output JSON
+│       ├── translations/argos/      # argostranslate output JSON
+│       ├── tts_audio/chatterbox/    # TTS WAV per config
+│       ├── dubbed_captions/         # Target-language VTT
+│       └── dubbed_videos/           # Final dubbed MP4 per config
+├── video_registry.yml           # Single source of truth for the video catalog
+├── docker-compose.yml           # Profiles: nvidia, cpu
+└── Dockerfile                   # API container (Python 3.11 slim + uv)
 ```
 
-## API Endpoints
+## Container layout
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/download` | Download YouTube video + captions |
-| POST | `/api/transcribe/{id}` | Whisper speech-to-text |
-| POST | `/api/translate/{id}` | Source → target language translation |
-| POST | `/api/tts/{id}` | Time-aligned TTS synthesis |
-| POST | `/api/stitch/{id}` | Audio remux (ffmpeg -c:v copy) |
-| GET | `/api/video/{id}` | Stream dubbed video (range requests) |
-| GET | `/api/video/{id}/original` | Stream original video (range requests) |
-| GET | `/api/captions/{id}` | Translated WebVTT captions |
-| GET | `/api/captions/{id}/original` | Original English WebVTT captions |
-| GET | `/api/audio/{id}` | TTS audio (WAV) |
-| GET | `/healthz` | Health check |
-
-## Development
-
-### Container architecture
-
-```
+```text
 Host machine
 ├── foreign_whispers/      ← bind-mounted into API container
 ├── api/                   ← bind-mounted into API container
-├── pipeline_data/api/     ← bind-mounted into API container
+├── pipeline_data/         ← bind-mounted into API container
 │
 └── Docker Compose
-    ├── foreign-whispers-stt   (GPU)  :8000  — Whisper inference
-    ├── foreign-whispers-tts   (GPU)  :8020  — Chatterbox inference
-    ├── foreign-whispers-api   (CPU)  :8080  — FastAPI orchestrator
-    └── foreign-whispers-frontend      :8501  — Next.js UI
+    ├── foreign-whispers-stt        :8000  — Whisper inference
+    ├── foreign-whispers-tts        :8020  — Chatterbox inference
+    ├── foreign-whispers-api        :8080  — FastAPI orchestrator (CPU only — delegates STT/TTS via HTTP)
+    └── foreign-whispers-frontend   :8501  — Next.js UI
 ```
 
-The API container is CPU-only — it delegates all GPU work to the STT and TTS
-containers via HTTP. The `foreign_whispers/` library and `api/` source are
-**bind-mounted** from the host, so edits on the host are immediately visible
-inside the container.
+The API container is CPU-only — it delegates all heavy work to the STT/TTS containers via HTTP. `foreign_whispers/` and `api/` are bind-mounted from the host so source edits don't require an image rebuild — just `restart api`.
 
-### Editing and debugging the library
+## Development
 
-1. **Start all services:**
+### Editing source
 
-   ```bash
-   docker compose --profile nvidia up -d
-   ```
-
-2. **Edit any file** in `foreign_whispers/` or `api/` on the host (e.g. in VS Code).
-
-3. **Restart the API container** to pick up changes:
+1. Start the stack: `docker compose --profile <nvidia|cpu> up -d`
+2. Edit any file in `foreign_whispers/` or `api/`.
+3. Pick up changes:
 
    ```bash
-   docker compose --profile nvidia restart api
+   docker compose --profile <nvidia|cpu> restart api
    ```
 
-   To avoid manual restarts, add `--reload` to the uvicorn command in
-   `docker-compose.yml`:
+   Or add `--reload` to the uvicorn command in [`docker-compose.yml`](docker-compose.yml) for hot reload during development.
 
-   ```yaml
-   command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
-   ```
-
-   With `--reload`, uvicorn watches for file changes and restarts automatically.
-
-4. **Test via the SDK** from a notebook or Python REPL on the host:
-
-   ```python
-   from foreign_whispers import FWClient
-   fw = FWClient()             # connects to http://localhost:8080
-   fw.transcribe("GYQ5yGV_-Oc")
-   ```
-
-5. **Test the library directly** (no Docker needed for pure-Python alignment work):
-
-   ```python
-   from foreign_whispers import global_align, compute_segment_metrics, clip_evaluation_report
-   ```
-
-   This is the two-phase workflow:
-   - **Phase 1 (SDK):** Call `FWClient` methods to drive the pipeline through Docker (download, transcribe, translate, TTS, stitch). Data lands in `pipeline_data/api/`.
-   - **Phase 2 (library):** Import `foreign_whispers` directly to iterate on alignment algorithms using data produced in Phase 1. No GPU or Docker needed.
-
-### Local setup (no Docker)
+### Working on the alignment library directly (no Docker)
 
 ```bash
-uv sync                    # install all dependencies
-uv run python -c "from foreign_whispers import FWClient; print('ok')"
+uv sync
+uv run python -c "from foreign_whispers import global_align, compute_segment_metrics; print('ok')"
 ```
 
-For Jupyter/VS Code notebooks, register the kernel once:
+For Jupyter / VS Code notebooks:
 
 ```bash
 uv pip install ipykernel
 uv run python -m ipykernel install --user --name foreign-whispers
 ```
 
-Then select the **foreign-whispers** kernel in VS Code's kernel picker.
+Then select the **foreign-whispers** kernel in the kernel picker.
 
 ### When to rebuild
 
-| Change | Action needed |
-|--------|--------------|
-| Edit `foreign_whispers/*.py` or `api/**/*.py` | Restart API container (or use `--reload`) |
-| Edit `pyproject.toml` / add dependencies | `docker compose --profile nvidia build api && docker compose --profile nvidia up -d api` |
-| Edit `frontend/` | Frontend has its own hot-reload; no action needed |
-| Edit `docker-compose.yml` | `docker compose --profile nvidia up -d` (re-creates changed services) |
+| Change                                  | Action needed                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------- |
+| Edit `foreign_whispers/*` or `api/**/*` | `docker compose --profile <p> restart api` (or use `--reload`)                  |
+| Edit `pyproject.toml` / add deps        | `docker compose --profile <p> build api && docker compose --profile <p> up -d api` |
+| Edit `frontend/`                        | Frontend runs in dev mode with hot reload — no action needed                    |
+| Edit `docker-compose.yml`               | `docker compose --profile <p> up -d` (re-creates changed services)              |
 
-### File ownership
+### Optional: HuggingFace token for diarization
 
-The API container runs as your host UID/GID (set in `.env`), so all files it
-creates in `pipeline_data/` are owned by you — not root. If you see permission
-errors on existing files, they were created by an older root-mode container:
+The pyannote speaker-diarization step is **optional**. If you want speaker-aware voice cloning, set `FW_HF_TOKEN` in `.env` (after accepting the pyannote model EULA on huggingface.co). Without it the diarize step returns an empty speaker list and TTS uses a single default voice — the rest of the pipeline still works.
 
-```bash
-sudo chown -R $(id -u):$(id -g) pipeline_data/
-```
+## Requirements
 
-### Frontend
-
-```bash
-cd frontend && pnpm install && pnpm dev
-```
-
-### Requirements
-
-- Python 3.11
-- ffmpeg (system-wide)
-- deno (for yt-dlp YouTube extraction)
-- NVIDIA GPU recommended for Whisper + Chatterbox inference
+- Python 3.11 (only needed if running notebooks / library outside Docker)
+- ffmpeg (system-wide, only needed for non-Docker workflows)
+- For the `nvidia` profile: NVIDIA drivers + the NVIDIA Container Toolkit

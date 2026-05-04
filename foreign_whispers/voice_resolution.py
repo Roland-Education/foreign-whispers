@@ -16,9 +16,9 @@ def resolve_speaker_wav(
     """Resolve the reference WAV path for voice cloning.
 
     Resolution order:
-    1. speakers/{lang}/{speaker_id}.wav  (if speaker_id given and file exists)
-    2. speakers/{lang}/default.wav       (language-specific default)
-    3. speakers/default.wav              (global fallback)
+    1. ``speakers/{lang}/{speaker_id}.wav``  (if speaker_id given and file exists)
+    2. ``speakers/{lang}/default.wav``       (language-specific default)
+    3. ``speakers/default.wav``              (global fallback)
 
     Args:
         speakers_dir: Absolute path to the speakers directory.
@@ -26,8 +26,23 @@ def resolve_speaker_wav(
         speaker_id: Optional speaker identifier (e.g. "SPEAKER_00").
 
     Returns:
-        Relative path string for the Chatterbox container (e.g. "es/default.wav").
+        Relative path string for the Chatterbox container (e.g. ``"es/default.wav"``).
+        Always returns a path even if no candidate exists on disk; callers
+        downstream are responsible for handling missing files (Chatterbox
+        will fall back to its default voice in that case).
     """
-    # ---- YOUR CODE HERE ----
-    raise NotImplementedError("Implement this function")
-    # ---- END YOUR CODE ----
+    base = Path(speakers_dir)
+
+    # 1. Speaker-specific WAV
+    if speaker_id:
+        candidate = base / target_language / f"{speaker_id}.wav"
+        if candidate.exists():
+            return f"{target_language}/{speaker_id}.wav"
+
+    # 2. Language-specific default
+    lang_default = base / target_language / "default.wav"
+    if lang_default.exists():
+        return f"{target_language}/default.wav"
+
+    # 3. Global default — returned even if it does not exist on disk
+    return "default.wav"

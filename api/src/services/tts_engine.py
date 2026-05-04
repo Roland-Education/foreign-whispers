@@ -16,6 +16,11 @@ from pydub import AudioSegment
 CHATTERBOX_API_URL = os.getenv("CHATTERBOX_API_URL", "http://localhost:8020")
 # Path to the default speaker reference WAV, relative to pipeline_data/speakers/
 CHATTERBOX_SPEAKER_WAV = os.getenv("CHATTERBOX_SPEAKER_WAV", "")
+# Per-request read timeout. CPU synthesis is slow — a single segment can
+# take several minutes on Apple Silicon — so default is generous. GPU
+# users can keep the env unset; the timeout only matters if the server
+# is slower than this value.
+CHATTERBOX_READ_TIMEOUT = float(os.getenv("CHATTERBOX_READ_TIMEOUT", "600"))
 
 # Set FW_ALIGNMENT=off to use the pre-alignment baseline (legacy unclamped stretch).
 # Default is "on" (new clamped path). Useful for A/B comparisons.
@@ -79,7 +84,7 @@ class ChatterboxClient:
         resp = requests.post(
             f"{self.base_url}/v1/audio/speech",
             json={"input": text, "response_format": "wav"},
-            timeout=(5, 60),
+            timeout=(5, CHATTERBOX_READ_TIMEOUT),
         )
         resp.raise_for_status()
         return resp.content
@@ -103,7 +108,7 @@ class ChatterboxClient:
                 f"{self.base_url}/v1/audio/speech/upload",
                 data={"input": text, "response_format": "wav"},
                 files={"voice_file": (wav_path.name, f, "audio/wav")},
-                timeout=(5, 60),
+                timeout=(5, CHATTERBOX_READ_TIMEOUT),
             )
         resp.raise_for_status()
         return resp.content
@@ -196,12 +201,20 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
-def _synthesize_raw(tts_engine, text: str, wav_path: str) -> bytes | None:
-    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
+def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
+    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure.
+
+    If *speaker_wav* is provided, passes it through as a kwarg so the
+    Chatterbox client routes the call to the voice-cloning endpoint.
+    Local Coqui falls back gracefully — it ignores unknown kwargs.
+    """
     if not text or not text.strip():
         return None
     try:
-        tts_engine.tts_to_file(text=text, file_path=wav_path)
+        if speaker_wav:
+            tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
+        else:
+            tts_engine.tts_to_file(text=text, file_path=wav_path)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
         print(f"[tts] TTS failed for segment ({exc}), using silence")
@@ -277,8 +290,11 @@ def _synced_segment_audio(tts_engine, text: str, target_sec: float, work_dir, st
     return _postprocess_segment(raw_bytes, target_sec, stretch_factor, alignment_enabled, str(work_dir))
 
 
-def text_to_speech(text, output_file_path):
-    _get_tts_engine().tts_to_file(text=text, file_path=str(output_file_path))
+def text_to_speech(text, output_file_path, speaker_wav: str | None = None):
+    if speaker_wav:
+        _get_tts_engine().tts_to_file(text=text, file_path=str(output_file_path), speaker_wav=speaker_wav)
+    else:
+        _get_tts_engine().tts_to_file(text=text, file_path=str(output_file_path))
 
 
 def _load_en_transcript(es_source_path: str) -> dict:
@@ -395,7 +411,15 @@ def _compute_speech_offset(source_path: str) -> float:
     return yt_start - whisper_start
 
 
-def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=None):
+def text_file_to_speech(
+    source_path,
+    output_path,
+    tts_engine=None,
+    *,
+    alignment=None,
+    speaker_wav: str | None = None,
+    voice_map: dict[str, str] | None = None,
+):
     """Read translated JSON with segment timestamps and produce a time-aligned WAV.
 
     Each segment is individually synthesized and time-stretched to match its
@@ -408,6 +432,14 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
 
     *alignment* overrides the module-level ``_ALIGNMENT_ENABLED`` flag.
     Pass True for aligned mode, False for baseline, or None to use the env var.
+
+    *speaker_wav* sets the default reference voice (relative path within
+    the speakers volume) for any segment whose speaker is not present in
+    *voice_map*.  Pass None to use the Chatterbox server default.
+
+    *voice_map* maps speaker labels (e.g. "SPEAKER_00") to reference WAV
+    paths so multi-speaker videos can use distinct cloned voices.  When
+    a segment's speaker is missing from the map, *speaker_wav* is used.
     """
     engine = tts_engine if tts_engine is not None else _get_tts_engine()
     use_alignment = alignment if alignment is not None else _ALIGNMENT_ENABLED
@@ -420,7 +452,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     if not segments:
         text = text_from_file(source_path)
         save_path = pathlib.Path(output_path) / pathlib.Path(save_name)
-        text_to_speech(text, str(save_path))
+        text_to_speech(text, str(save_path), speaker_wav=speaker_wav)
         print("success!")
         return None
 
@@ -456,6 +488,12 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
                     en_text = en_segs[i].get("text", "")
                 seg_text = _shorten_segment_text(en_text, seg["text"], target_sec)
 
+        # Resolve which reference voice to use for this segment
+        seg_speaker_wav = speaker_wav  # default for the whole clip
+        if voice_map:
+            spk = seg.get("speaker", "SPEAKER_00")
+            seg_speaker_wav = voice_map.get(spk, speaker_wav)
+
         seg_metas.append({
             "index": i,
             "text": seg_text,
@@ -464,6 +502,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             "target_sec": target_sec,
             "stretch_factor": stretch_factor,
             "aligned_seg": aligned_seg,
+            "speaker_wav": seg_speaker_wav,
         })
 
     # ── Phase 1: GPU synthesis (concurrent) ───────────────────────────
@@ -475,13 +514,13 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     raw_wav_map: dict[int, bytes | None] = {}
 
     with tempfile.TemporaryDirectory() as synth_dir:
-        def _do_synth(idx: int, text: str) -> tuple[int, bytes | None]:
+        def _do_synth(idx: int, text: str, sw: str | None) -> tuple[int, bytes | None]:
             wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-            return idx, _synthesize_raw(engine, text, wav_path)
+            return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=sw)
 
         with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
             futures = {
-                pool.submit(_do_synth, m["index"], m["text"]): m["index"]
+                pool.submit(_do_synth, m["index"], m["text"], m["speaker_wav"]): m["index"]
                 for m in seg_metas
             }
             for fut in as_completed(futures):

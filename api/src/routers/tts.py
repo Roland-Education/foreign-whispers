@@ -11,8 +11,15 @@ from fastapi.responses import FileResponse
 from api.src.core.config import settings
 from api.src.core.dependencies import resolve_title
 from api.src.services.tts_service import TTSService
+from foreign_whispers.voice_resolution import resolve_speaker_wav
 
 router = APIRouter(prefix="/api")
+
+
+# Target language for voice resolution. Could be made configurable per request
+# in a future revision; for now this matches the project's only translation
+# direction (EN → ES).
+_TARGET_LANG = "es"
 
 
 async def _run_in_threadpool(executor, fn, *args, **kwargs):
@@ -27,11 +34,22 @@ async def tts_endpoint(
     request: Request,
     config: str = Query(..., pattern=r"^c-[0-9a-f]{7}$"),
     alignment: bool = Query(False),
+    speaker_wav: str | None = Query(
+        None,
+        description="Reference voice WAV path relative to pipeline_data/speakers/ "
+                    "(e.g. 'es/default.wav'). When omitted, resolves automatically "
+                    "from the target language and any per-segment speaker labels.",
+    ),
 ):
     """Generate TTS audio for a translated transcript.
 
     *config* is an opaque directory name for caching.
     *alignment* enables temporal alignment (clamped stretch).
+    *speaker_wav* overrides the default reference voice for the whole clip.
+        If the translated transcript already has per-segment ``speaker``
+        labels (from diarization), each unique speaker is mapped to its
+        own reference voice via :func:`resolve_speaker_wav`; this query
+        parameter then acts as the fallback for unknown speakers.
     """
     trans_dir = settings.translations_dir
     audio_dir = settings.tts_audio_dir / config
@@ -57,14 +75,55 @@ async def tts_endpoint(
 
     source_path = str(trans_dir / f"{title}.json")
 
+    # Resolve the default voice when caller did not specify one
+    if speaker_wav is None:
+        speaker_wav = resolve_speaker_wav(settings.speakers_dir, _TARGET_LANG)
+
+    # Build per-speaker voice_map from the translated transcript when
+    # diarization labels are present. Unknown speakers fall back to
+    # *speaker_wav* via the engine's voice_map.get(spk, default) lookup.
+    voice_map = _build_voice_map(source_path, settings.speakers_dir)
+
     await _run_in_threadpool(
-        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment
+        None, svc.text_file_to_speech, source_path, str(audio_dir),
+        alignment=alignment,
+        speaker_wav=speaker_wav,
+        voice_map=voice_map,
     )
 
     return {
         "video_id": video_id,
         "audio_path": str(wav_path),
         "config": config,
+        "speaker_wav": speaker_wav,
+        "voice_map": voice_map,
+    }
+
+
+def _build_voice_map(source_path: str, speakers_dir: pathlib.Path) -> dict[str, str] | None:
+    """Inspect a translated transcript and return a speaker -> WAV mapping.
+
+    Returns None when no segments carry ``speaker`` labels (single-speaker
+    case). When at least one segment is labelled, every unique label gets
+    a reference WAV via :func:`resolve_speaker_wav`.
+    """
+    try:
+        with open(source_path) as f:
+            translated = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    segments = translated.get("segments", [])
+    speakers = sorted({
+        seg.get("speaker") for seg in segments
+        if seg.get("speaker")
+    })
+    if not speakers:
+        return None
+
+    return {
+        spk: resolve_speaker_wav(speakers_dir, _TARGET_LANG, spk)
+        for spk in speakers
     }
 
 
